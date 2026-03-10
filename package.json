@@ -1,0 +1,32 @@
+{
+  "name": "pi-ask",
+  "version": "0.2.0",
+  "description": "Cross-model consultation wrapper and Oh My Pi plugin",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/artiombell/pi-ask.git"
+  },
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "pi",
+    "plugin",
+    "cross-model",
+    "consultation"
+  ],
+  "bin": {
+    "pi-ask": "scripts/pi-ask"
+  },
+  "files": [
+    "README.md",
+    "scripts/pi-ask",
+    "tools/pi-ask.ts"
+  ],
+  "omp": {
+    "name": "pi-ask",
+    "description": "Run cross-model consultation from an installable plugin tool",
+    "tools": "./tools/pi-ask.ts"
+  }
+}

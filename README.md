@@ -1,17 +1,23 @@
 # pi-ask
 
-`pi-ask` is a CLI wrapper for cross-model consultation workflows.
+`pi-ask` is both:
+- a standalone CLI wrapper (`scripts/pi-ask`) for cross-model consultation
+- an installable Oh My Pi plugin tool (`pi_ask`)
 
-It adds:
+## Features
+
 - model alias resolution (`opus`, `codex`, `gemini`, etc.)
 - pre-flight model availability probe (`--probe`)
 - full context pass-through (no truncation)
 - Codex output cleanup (filters CLI header/noise)
 - Anthropic auth recovery helpers
+- plugin packaging via `package.json` + `omp.tools` manifest
 
 ## Repository Layout
 
-- `scripts/pi-ask` — main executable
+- `scripts/pi-ask` — standalone CLI executable
+- `tools/pi-ask.ts` — Oh My Pi plugin custom tool module
+- `package.json` — npm/package metadata + OMP plugin manifest
 
 ## Requirements
 
@@ -20,38 +26,50 @@ It adds:
 - `codex` CLI (for OpenAI/Codex/Google/xAI/Mistral routes)
 - `jq` (optional, used for Anthropic OAuth token load)
 
-## Install
+## Standalone CLI Usage
 
 ```bash
+# clone
 git clone https://github.com/artiombell/pi-ask.git
 cd pi-ask
 chmod +x scripts/pi-ask
+
+# list models known to the wrapper
+scripts/pi-ask --list
+
+# probe model availability without sending context
+scripts/pi-ask opus --probe
+
+# send context by file
+scripts/pi-ask opus -f /tmp/context.md
+
+# send context by stdin
+cat /tmp/context.md | scripts/pi-ask sonnet
 ```
 
-Optional shell alias:
+Optional alias:
 
 ```bash
 alias pi-ask="$PWD/scripts/pi-ask"
 ```
 
-## Usage
+## Install as Oh My Pi Plugin
 
 ```bash
-# List supported canonical models + aliases
-scripts/pi-ask --list
+# from local checkout (for development)
+omp plugin link /absolute/path/to/pi-ask
 
-# Probe availability without sending context
-scripts/pi-ask opus --probe
-scripts/pi-ask codex --probe
-
-# Send context by file
-scripts/pi-ask opus -f /tmp/context.md
-
-# Send context by stdin
-cat /tmp/context.md | scripts/pi-ask sonnet
+# from github package source
+omp plugin install github:artiombell/pi-ask
 ```
 
-## Exit Codes
+After install, the plugin exposes tool `pi_ask` with parameters:
+- `model` (required unless `listModels=true`)
+- `prompt` or `contextFile` (required unless `probe=true` or `listModels=true`)
+- `probe` (optional boolean)
+- `listModels` (optional boolean)
+
+## Exit Codes (CLI)
 
 - `0` success
 - `1` model not found or ambiguous alias
