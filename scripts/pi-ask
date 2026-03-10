@@ -1,0 +1,628 @@
+#!/usr/bin/env bash
+# pi-ask: Cross-model consultation wrapper with model resolution and validation.
+#
+# Usage:
+#   pi-ask <model-alias> [--probe] < context.md
+#   pi-ask <model-alias> [--probe] -f <context-file>
+#   echo "question" | pi-ask opus
+#
+# No artificial timeouts. The model runs until it finishes or the user
+# sends SIGINT (Ctrl-C). Remote model services have their own server-side
+# timeouts; local timeout heuristics are wrong for agents that think,
+# read files, and run tools for minutes at a time.
+#
+# --probe: validate model availability (fast PING) without sending context.
+#
+# Exit codes:
+#   0  success
+#   1  model not found / ambiguous
+#   2  model unavailable (probe failed)
+#   4  context file not found
+#   5  no stdin and no -f provided
+
+set -euo pipefail
+
+PI_ASK_LAST_PROBE_OUTPUT=""
+
+# ---------------------------------------------------------------------------
+# Model registry
+# ---------------------------------------------------------------------------
+# Format: "alias:canonical_name:provider:cli_command"
+# provider: anthropic | openai
+# cli_command: the actual invocation prefix
+
+MODELS=(
+  # Anthropic
+  "opus:claude-opus-4-6:anthropic:claude -p --model opus"
+  "opus4.6:claude-opus-4-6:anthropic:claude -p --model opus"
+  "claude-opus:claude-opus-4-6:anthropic:claude -p --model opus"
+  "claude-opus-4-6:claude-opus-4-6:anthropic:claude -p --model opus"
+  "sonnet:claude-sonnet-4-6:anthropic:claude -p --model sonnet"
+  "sonnet4.6:claude-sonnet-4-6:anthropic:claude -p --model sonnet"
+  "claude-sonnet:claude-sonnet-4-6:anthropic:claude -p --model sonnet"
+  "claude-sonnet-4-6:claude-sonnet-4-6:anthropic:claude -p --model sonnet"
+  "sonnet4.5:claude-sonnet-4-5:anthropic:claude -p --model sonnet4.5"
+  "claude-sonnet-4-5:claude-sonnet-4-5:anthropic:claude -p --model sonnet4.5"
+  "haiku:claude-haiku-4-5:anthropic:claude -p --model haiku"
+  "haiku4.5:claude-haiku-4-5:anthropic:claude -p --model haiku"
+  "claude-haiku:claude-haiku-4-5:anthropic:claude -p --model haiku"
+  "claude-haiku-4-5:claude-haiku-4-5:anthropic:claude -p --model haiku"
+  # OpenAI
+  "gpt-5.2-pro:gpt-5.2-pro:openai:codex exec -m gpt-5.2-pro"
+  "5.2-pro:gpt-5.2-pro:openai:codex exec -m gpt-5.2-pro"
+  "gpt5.2pro:gpt-5.2-pro:openai:codex exec -m gpt-5.2-pro"
+  "gpt-5.2:gpt-5.2:openai:codex exec -m gpt-5.2"
+  "5.2:gpt-5.2:openai:codex exec -m gpt-5.2"
+  "gpt5.2:gpt-5.2:openai:codex exec -m gpt-5.2"
+  "gpt-5-mini:gpt-5-mini:openai:codex exec -m gpt-5-mini"
+  "5-mini:gpt-5-mini:openai:codex exec -m gpt-5-mini"
+  "gpt5mini:gpt-5-mini:openai:codex exec -m gpt-5-mini"
+  "gpt-4.1:gpt-4.1:openai:codex exec -m gpt-4.1"
+  "4.1:gpt-4.1:openai:codex exec -m gpt-4.1"
+  "gpt4.1:gpt-4.1:openai:codex exec -m gpt-4.1"
+  "gpt-4o:gpt-4o:openai:codex exec -m gpt-4o"
+  "4o:gpt-4o:openai:codex exec -m gpt-4o"
+  # OpenAI Codex
+  "gpt-5.3-codex:gpt-5.3-codex:openai:codex exec -m gpt-5.3-codex"
+  "5.3:gpt-5.3-codex:openai:codex exec -m gpt-5.3-codex"
+  "codex:gpt-5.3-codex:openai:codex exec -m gpt-5.3-codex"
+  "5.3-codex:gpt-5.3-codex:openai:codex exec -m gpt-5.3-codex"
+  "codex5.3:gpt-5.3-codex:openai:codex exec -m gpt-5.3-codex"
+  "gpt-5.3-codex-spark:gpt-5.3-codex-spark:openai:codex exec -m gpt-5.3-codex-spark"
+  "spark:gpt-5.3-codex-spark:openai:codex exec -m gpt-5.3-codex-spark"
+  "5.3-spark:gpt-5.3-codex-spark:openai:codex exec -m gpt-5.3-codex-spark"
+  "codex-spark:gpt-5.3-codex-spark:openai:codex exec -m gpt-5.3-codex-spark"
+  "gpt-5.1-codex-max:gpt-5.1-codex-max:openai:codex exec -m gpt-5.1-codex-max"
+  "codex-max:gpt-5.1-codex-max:openai:codex exec -m gpt-5.1-codex-max"
+  "5.1-max:gpt-5.1-codex-max:openai:codex exec -m gpt-5.1-codex-max"
+  # Google
+  "gemini-3.1-pro:gemini-3.1-pro:openai:codex exec -m gemini-3.1-pro"
+  "gemini:gemini-3.1-pro:openai:codex exec -m gemini-3.1-pro"
+  "g3.1:gemini-3.1-pro:openai:codex exec -m gemini-3.1-pro"
+  "gemini-pro:gemini-3.1-pro:openai:codex exec -m gemini-3.1-pro"
+  "gemini-3-flash:gemini-3-flash:openai:codex exec -m gemini-3-flash"
+  "g3-flash:gemini-3-flash:openai:codex exec -m gemini-3-flash"
+  "gemini-flash:gemini-3-flash:openai:codex exec -m gemini-3-flash"
+  "gemini-2.5-pro:gemini-2.5-pro:openai:codex exec -m gemini-2.5-pro"
+  "g2.5:gemini-2.5-pro:openai:codex exec -m gemini-2.5-pro"
+  "g2.5-pro:gemini-2.5-pro:openai:codex exec -m gemini-2.5-pro"
+  "gemini-2.5-flash:gemini-2.5-flash:openai:codex exec -m gemini-2.5-flash"
+  "g2.5-flash:gemini-2.5-flash:openai:codex exec -m gemini-2.5-flash"
+  # xAI
+  "grok-4:grok-4:openai:codex exec -m grok-4"
+  "grok:grok-4:openai:codex exec -m grok-4"
+  "grok4:grok-4:openai:codex exec -m grok-4"
+  "grok-4-fast:grok-4-fast:openai:codex exec -m grok-4-fast"
+  "grok-fast:grok-4-fast:openai:codex exec -m grok-4-fast"
+  "grok4-fast:grok-4-fast:openai:codex exec -m grok-4-fast"
+  "grok-3-mini:grok-3-mini:openai:codex exec -m grok-3-mini"
+  "grok-mini:grok-3-mini:openai:codex exec -m grok-3-mini"
+  "grok3-mini:grok-3-mini:openai:codex exec -m grok-3-mini"
+  # Mistral
+  "mistral-large-latest:mistral-large-latest:openai:codex exec -m mistral-large-latest"
+  "mistral:mistral-large-latest:openai:codex exec -m mistral-large-latest"
+  "mistral-large:mistral-large-latest:openai:codex exec -m mistral-large-latest"
+  "codestral-latest:codestral-latest:openai:codex exec -m codestral-latest"
+  "codestral:codestral-latest:openai:codex exec -m codestral-latest"
+)
+
+# ---------------------------------------------------------------------------
+# Fuzzy model resolution
+# ---------------------------------------------------------------------------
+
+normalize() {
+  # lowercase, strip spaces/dashes/dots for fuzzy comparison
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]\.-]//g'
+}
+
+resolve_model() {
+  local input="$1"
+  local input_lower
+  input_lower=$(echo "$input" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]]//g')
+
+  # Phase 1: Exact alias match (lowercased, spaces stripped)
+  for entry in "${MODELS[@]}"; do
+    local alias canonical provider cli
+    IFS=':' read -r alias canonical provider cli <<< "$entry"
+    if [[ "$input_lower" == "$alias" ]]; then
+      echo "$canonical:$provider:$cli"
+      return 0
+    fi
+  done
+
+  # Phase 2: Normalized exact match (strip dashes/dots too)
+  local input_norm
+  input_norm=$(normalize "$input")
+  local matches=()
+  local seen_canonical=()
+
+  for entry in "${MODELS[@]}"; do
+    local alias canonical provider cli
+    IFS=':' read -r alias canonical provider cli <<< "$entry"
+    local alias_norm
+    alias_norm=$(normalize "$alias")
+    local canonical_norm
+    canonical_norm=$(normalize "$canonical")
+    # Match if:
+    #   1. Normalized strings are equal, OR
+    #   2. Input is a prefix of the alias/canonical (min 3 chars), OR
+    #   3. Alias is a prefix of the input (min 3 chars)
+    local matched=0
+    if [[ "$alias_norm" == "$input_norm" ]] || [[ "$canonical_norm" == "$input_norm" ]]; then
+      matched=1
+    elif [[ ${#input_norm} -ge 3 ]]; then
+      if [[ "$alias_norm" == "$input_norm"* ]] || [[ "$canonical_norm" == "$input_norm"* ]]; then
+        matched=1
+      elif [[ "$input_norm" == "$alias_norm"* ]] || [[ "$input_norm" == "$canonical_norm"* ]]; then
+        matched=1
+      fi
+    fi
+    if [[ $matched -eq 1 ]]; then
+      # Deduplicate by canonical name
+      local already=0
+      for seen in "${seen_canonical[@]+"${seen_canonical[@]}"}"; do
+        if [[ "$seen" == "$canonical" ]]; then
+          already=1
+          break
+        fi
+      done
+      if [[ $already -eq 0 ]]; then
+        matches+=("$canonical:$provider:$cli")
+        seen_canonical+=("$canonical")
+      fi
+    fi
+  done
+
+  if [[ ${#matches[@]} -eq 1 ]]; then
+    echo "${matches[0]}"
+    return 0
+  fi
+
+  if [[ ${#matches[@]} -gt 1 ]]; then
+    echo "AMBIGUOUS" >&2
+    echo "Model '$input' is ambiguous. Did you mean one of:" >&2
+    for m in "${matches[@]}"; do
+      local canonical
+      IFS=':' read -r canonical _ _ <<< "$m"
+      echo "  - $canonical" >&2
+    done
+    return 1
+  fi
+
+  echo "NOT_FOUND" >&2
+  echo "Model '$input' not recognized. Available models:" >&2
+  # Print unique canonical names
+  local printed=()
+  for entry in "${MODELS[@]}"; do
+    local alias canonical provider cli
+    IFS=':' read -r alias canonical provider cli <<< "$entry"
+    local already=0
+    for p in "${printed[@]+"${printed[@]}"}"; do
+      [[ "$p" == "$canonical" ]] && already=1 && break
+    done
+    if [[ $already -eq 0 ]]; then
+      printed+=("$canonical")
+      # Collect aliases for this canonical
+      local aliases_str=""
+      for e2 in "${MODELS[@]}"; do
+        local a2 c2 p2 cl2
+        IFS=':' read -r a2 c2 p2 cl2 <<< "$e2"
+        if [[ "$c2" == "$canonical" ]] && [[ "$a2" != "$canonical" ]]; then
+          aliases_str="${aliases_str:+$aliases_str, }$a2"
+        fi
+      done
+      echo "  $canonical (aliases: $aliases_str)" >&2
+    fi
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+is_auth_failure() {
+  local output="${1:-}"
+  [[ -n "$output" ]] || return 1
+  echo "$output" | grep -Eqi \
+    "401|authentication[_[:space:]-]?error|invalid authentication credentials|unauthorized|not[[:space:]]+authenticated|auth[[:space:]]+required|failed to authenticate"
+}
+
+load_pi_anthropic_oauth_token() {
+  local force="${1:-0}"
+  if [[ "$force" != "1" && -n "${ANTHROPIC_OAUTH_TOKEN:-}" ]]; then
+    return 0
+  fi
+  command -v jq >/dev/null 2>&1 || return 1
+
+  local pi_agent_dir auth_file token
+  pi_agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+  auth_file="${PI_ASK_AUTH_FILE:-$pi_agent_dir/auth.json}"
+  [[ -f "$auth_file" ]] || return 1
+
+  token=$(jq -r '.anthropic.access // empty' "$auth_file" 2>/dev/null || true)
+  if [[ -z "$token" || "$token" == "null" ]]; then
+    return 1
+  fi
+
+  export ANTHROPIC_OAUTH_TOKEN="$token"
+  echo "pi-ask: loaded Anthropic OAuth token from $auth_file" >&2
+  return 0
+}
+
+attempt_interactive_anthropic_login() {
+  # Login flow requires an interactive TTY (browser/device auth).
+  [[ -t 0 && -t 1 ]] || return 1
+  if command -v pi >/dev/null 2>&1; then
+    echo "pi-ask: opening interactive pi session for Anthropic OAuth." >&2
+    echo "pi-ask: in pi, run '/login anthropic', complete browser auth, then '/exit'." >&2
+    pi
+    return $?
+  fi
+  command -v claude >/dev/null 2>&1 || return 1
+  echo "pi-ask: attempting interactive Anthropic login via 'claude auth login'..." >&2
+  claude auth login
+}
+
+# ---------------------------------------------------------------------------
+# Probe: quick availability check
+# ---------------------------------------------------------------------------
+
+probe_model() {
+  local provider="$1"
+  local cli="$2"
+  local canonical="$3"
+
+  echo "Probing $canonical..." >&2
+
+  local probe_input="respond with exactly: PONG"
+  local probe_output
+  local probe_exit=0
+
+  if [[ "$provider" == "anthropic" ]]; then
+    # Unset ALL Claude nesting detection env vars
+    probe_output=$(env -u CLAUDECODE -u CLAUDE_CODE -u CLAUDE_CODE_SESSION \
+      $cli --max-turns 1 <<< "$probe_input" 2>&1) || probe_exit=$?
+  else
+    probe_output=$($cli "$probe_input" 2>&1) || probe_exit=$?
+  fi
+
+  PI_ASK_LAST_PROBE_OUTPUT="$probe_output"
+
+  if echo "$probe_output" | grep -qi "PONG"; then
+    echo "OK: $canonical is available" >&2
+    return 0
+  else
+    echo "FAIL: $canonical is not available on this account" >&2
+    if echo "$probe_output" | grep -qi "not supported\|error\|unavailable\|nested\|cannot be launched"; then
+      echo "$probe_output" | grep -i "error\|not supported\|unavailable\|nested\|cannot" | head -3 >&2
+    fi
+    return 1
+  fi
+}
+
+probe_model_with_recovery() {
+  local provider="$1"
+  local cli="$2"
+  local canonical="$3"
+
+  if probe_model "$provider" "$cli" "$canonical"; then
+    return 0
+  fi
+
+  if [[ "$provider" != "anthropic" ]] || ! is_auth_failure "$PI_ASK_LAST_PROBE_OUTPUT"; then
+    return 1
+  fi
+
+  if load_pi_anthropic_oauth_token 1; then
+    echo "pi-ask: retrying $canonical probe with PI Anthropic OAuth token..." >&2
+    if probe_model "$provider" "$cli" "$canonical"; then
+      return 0
+    fi
+  fi
+
+  if is_auth_failure "$PI_ASK_LAST_PROBE_OUTPUT"; then
+    if attempt_interactive_anthropic_login; then
+      echo "pi-ask: retrying $canonical probe after login..." >&2
+      if probe_model "$provider" "$cli" "$canonical"; then
+        return 0
+      fi
+    fi
+
+    echo "pi-ask: Anthropic authentication failed for $canonical." >&2
+    echo "pi-ask: Re-authenticate with one of:" >&2
+    echo "  - Open pi and run: /login anthropic" >&2
+    echo "  - Run: claude auth login" >&2
+  fi
+
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Run model command and stream output
+# ---------------------------------------------------------------------------
+
+run_model() {
+  local provider="$1"
+  local cli="$2"
+  local context_file="$3"
+
+  if [[ "$provider" == "anthropic" ]]; then
+    # Unset ALL Claude nesting detection env vars so we can call claude
+    # from inside a Claude Code / omp session without it refusing.
+    env -u CLAUDECODE -u CLAUDE_CODE -u CLAUDE_CODE_SESSION \
+      $cli < "$context_file" 2>&1
+  else
+    $cli "$(cat "$context_file")" 2>&1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Filter codex noise from output
+# ---------------------------------------------------------------------------
+# Codex CLI prints a header block, "thinking" lines, and metadata that
+# pollute the actual model response. Strip everything before the first
+# real content line.
+
+filter_codex_output() {
+  # Streaming line filter for codex CLI output.
+  # If codex CLI header is detected, strips noise and streams content.
+  # If format is unrecognized, passes everything through raw (never drops output).
+  #
+  # Codex CLI format (when present):
+  #   1. Header lines ("OpenAI Codex...", model info, session id)
+  #   2. "user" marker
+  #   3. Echoed prompt
+  #   4. "mcp startup:..." line
+  #   5. Noise (thinking, codex, warnings)
+  #   6. Model response
+  #   7. "tokens used" + count (trailing metadata)
+  #
+  # Safety: buffers at most 30 header lines. If no "user" marker found,
+  # flushes buffer and switches to raw passthrough. Never hangs, never drops.
+
+  local phase="header"
+  local header_count=0
+  local header_buf=()
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$phase" in
+      header)
+        header_count=$((header_count + 1))
+        if [[ "$line" == "user" ]]; then
+          # Codex format confirmed — discard header, move on
+          header_buf=()
+          phase="prompt_echo"
+          continue
+        fi
+        header_buf+=("$line")
+        if [[ $header_count -ge 30 ]]; then
+          # No codex header detected — flush buffer, passthrough everything
+          for buffered in "${header_buf[@]}"; do echo "$buffered"; done
+          header_buf=()
+          phase="passthrough"
+        fi
+        ;;
+      prompt_echo)
+        [[ "$line" == "mcp startup:"* ]] && phase="post_mcp"
+        continue
+        ;;
+      post_mcp)
+        if [[ "$line" == "thinking" ]] || \
+           [[ "$line" == "codex" ]] || \
+           [[ "$line" == "**"* ]] || \
+           [[ "$line" == "warning:"* ]] || \
+           [[ "$line" == "exec"* ]] || \
+           [[ "$line" == "ERROR:"* ]] || \
+           [[ "$line" == "" ]]; then
+          continue
+        fi
+        phase="content"
+        echo "$line"
+        ;;
+      content)
+        if [[ "$line" == "tokens used" ]]; then
+          phase="tail"
+          continue
+        fi
+        echo "$line"
+        ;;
+      tail)
+        # Suppress everything after "tokens used"
+        continue
+        ;;
+      passthrough)
+        # Unrecognized format — pass everything raw
+        echo "$line"
+        ;;
+    esac
+  done
+
+  # Flush any remaining buffered header lines (e.g. input < 30 lines, no markers)
+  if [[ ${#header_buf[@]} -gt 0 ]]; then
+    for buffered in "${header_buf[@]}"; do echo "$buffered"; done
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat >&2 <<EOF
+Usage: pi-ask <model> [options] [-f <context-file>]
+       echo "context" | pi-ask <model> [options]
+
+Options:
+  --probe               Just check if the model is available, don't send context.
+  --list                List all available models and their aliases.
+  -f <file>             Read context from file instead of stdin.
+  --help                Show this help.
+
+No timeouts. The model runs until it finishes or you press Ctrl-C.
+Context is sent AS-IS. No truncation, no simplification.
+EOF
+  exit 0
+}
+
+main() {
+  local model_input=""
+  local probe_only=0
+  local context_file=""
+  local list_models=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --probe)
+        probe_only=1
+        shift
+        ;;
+      --list)
+        list_models=1
+        shift
+        ;;
+      -f)
+        context_file="$2"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        ;;
+      -*)
+        echo "Unknown option: $1" >&2
+        usage
+        ;;
+      *)
+        if [[ -z "$model_input" ]]; then
+          model_input="$1"
+        else
+          model_input="$model_input $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  # --list mode
+  if [[ $list_models -eq 1 ]]; then
+    echo "Available models:"
+    local printed=()
+    for entry in "${MODELS[@]}"; do
+      local alias canonical provider cli
+      IFS=':' read -r alias canonical provider cli <<< "$entry"
+      local already=0
+      for p in "${printed[@]+"${printed[@]}"}"; do
+        [[ "$p" == "$canonical" ]] && already=1 && break
+      done
+      if [[ $already -eq 0 ]]; then
+        printed+=("$canonical")
+        local aliases_str=""
+        for e2 in "${MODELS[@]}"; do
+          local a2 c2 p2 cl2
+          IFS=':' read -r a2 c2 p2 cl2 <<< "$e2"
+          if [[ "$c2" == "$canonical" ]] && [[ "$a2" != "$canonical" ]]; then
+            aliases_str="${aliases_str:+$aliases_str, }$a2"
+          fi
+        done
+        printf "  %-25s  (%s) aliases: %s\n" "$canonical" "$provider" "$aliases_str"
+      fi
+    done
+    exit 0
+  fi
+
+  if [[ -z "$model_input" ]]; then
+    echo "Error: model name required" >&2
+    usage
+  fi
+
+  # Resolve model
+  local resolved
+  resolved=$(resolve_model "$model_input") || exit 1
+
+  local canonical provider cli
+  IFS=':' read -r canonical provider cli <<< "$resolved"
+
+  echo "pi-ask: resolved '$model_input' -> $canonical ($provider)" >&2
+  echo "pi-ask: command: $cli" >&2
+
+  # Probe mode
+  if [[ $probe_only -eq 1 ]]; then
+    probe_model_with_recovery "$provider" "$cli" "$canonical"
+    exit $?
+  fi
+
+  # Pre-flight probe: validate model is available before sending context
+  if ! probe_model_with_recovery "$provider" "$cli" "$canonical"; then
+    echo "" >&2
+    echo "pi-ask: model $canonical is not available. Aborting." >&2
+    echo "pi-ask: try 'pi-ask --list' to see available models." >&2
+    exit 2
+  fi
+
+  # Read context
+  local tmp_context
+  tmp_context=$(mktemp /tmp/pi-ask-context-XXXXXX)
+  # Heartbeat PID tracked here so EXIT trap can clean it up.
+  local heartbeat_pid=""
+  trap 'rm -f "${tmp_context:-}"; [[ -n "${heartbeat_pid:-}" ]] && kill "${heartbeat_pid}" 2>/dev/null; true' EXIT
+
+  if [[ -n "$context_file" ]]; then
+    if [[ ! -f "$context_file" ]]; then
+      echo "Error: context file not found: $context_file" >&2
+      exit 4
+    fi
+    cp "$context_file" "$tmp_context"
+  elif [[ ! -t 0 ]]; then
+    cat > "$tmp_context"
+  else
+    echo "Error: no context provided. Pipe via stdin or use -f <file>." >&2
+    exit 5
+  fi
+
+  local ctx_size
+  ctx_size=$(wc -c < "$tmp_context" | tr -d ' ')
+  local ctx_lines
+  ctx_lines=$(wc -l < "$tmp_context" | tr -d ' ')
+  echo "pi-ask: context size: ${ctx_size} bytes, ${ctx_lines} lines" >&2
+  echo "pi-ask: sending full context to $canonical (no truncation)..." >&2
+  echo "" >&2
+
+  # Execute: stream model output directly.
+  # Anthropic: pipe stdin, stream stdout.
+  # Codex/OpenAI: stream through filter + heartbeat on stderr.
+  #   - Filter strips CLI noise from stdout (streaming, line-by-line).
+  #   - Heartbeat prints to stderr so callers know we're alive during
+  #     the thinking phase before any output arrives.
+  local exit_code=0
+  if [[ "$provider" == "anthropic" ]]; then
+    run_model "$provider" "$cli" "$tmp_context"
+    exit_code=$?
+  else
+    # Heartbeat to stderr while model thinks (before any output streams).
+    echo "pi-ask: $canonical is reasoning..." >&2
+    (
+      elapsed=0
+      while true; do
+        sleep 15
+        elapsed=$((elapsed + 15))
+        printf "pi-ask: ... still waiting (%ds elapsed)\n" "$elapsed" >&2
+      done
+    ) &
+    heartbeat_pid=$!
+
+    # Stream through filter. || true prevents set -e from exiting before
+    # we can kill the heartbeat and capture the exit code.
+    run_model "$provider" "$cli" "$tmp_context" | filter_codex_output || true
+    exit_code=${PIPESTATUS[0]}
+
+    # Stop heartbeat (also cleaned up by EXIT trap as a safety net).
+    kill "$heartbeat_pid" 2>/dev/null
+    wait "$heartbeat_pid" 2>/dev/null
+    heartbeat_pid=""
+    echo "pi-ask: $canonical responded." >&2
+  fi
+
+  exit ${exit_code}
+}
+
+main "$@"
