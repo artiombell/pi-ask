@@ -59,8 +59,8 @@ alias pi-ask="$PWD/scripts/pi-ask"
 # from local checkout (for development)
 omp plugin link /absolute/path/to/pi-ask
 
-# from github package source
-omp plugin install github:artiombell/pi-ask
+# from npm (after publish)
+omp plugin install pi-ask
 ```
 
 After install, the plugin exposes tool `pi_ask` with parameters:
