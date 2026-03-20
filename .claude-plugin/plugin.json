@@ -1,0 +1,12 @@
+{
+  "name": "pi-ask",
+  "description": "Cross-model consultation — send context to opus, codex, gemini, grok, mistral, or any supported model for a second opinion. Fuzzy model resolution, pre-flight probes, and auth recovery.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Artiom Bell",
+    "email": "artiombell@microsoft.com"
+  },
+  "repository": "https://github.com/artiombell/pi-ask",
+  "keywords": ["cross-model", "consultation", "opus", "codex", "gemini", "grok", "mistral", "multi-model", "second-opinion"],
+  "skills": "skills/"
+}

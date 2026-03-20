@@ -1,84 +1,57 @@
 # pi-ask
 
-`pi-ask` is both:
-- a standalone CLI wrapper (`scripts/pi-ask`) for cross-model consultation
-- an installable Oh My Pi plugin tool (`pi_ask`)
+Cross-model consultation plugin for the Agency Playground.
 
-## Features
+Send context to **any model** supported by the `claude` or `codex` CLI for a second opinion, directly from your coding agent session.
 
-- model alias resolution (`opus`, `codex`, `gemini`, etc.)
-- pre-flight model availability probe (`--probe`)
-- full context pass-through (no truncation)
-- Codex output cleanup (filters CLI header/noise)
-- Anthropic auth recovery helpers
-- plugin packaging via `package.json` + `omp.tools` manifest
+## What it does
 
-## Repository Layout
+- **Dynamic model resolution** -- any model name works; short aliases for common models
+- **Pre-flight probes** -- validates model availability (with auth error detection) before sending context
+- **Full context pass-through** -- no truncation, no simplification
+- **Auth recovery** -- automatic Anthropic OAuth token loading and interactive login fallback
+- **Output filtering** -- strips Codex CLI noise from non-Anthropic responses
 
-- `scripts/pi-ask` — standalone CLI executable
-- `tools/pi-ask.ts` — Oh My Pi plugin custom tool module
-- `package.json` — npm/package metadata + OMP plugin manifest
+## Prerequisites
 
-## Requirements
-
-- `bash` 4+
+- `bash` 4+ (Git Bash on Windows)
 - `claude` CLI (for Anthropic models)
-- `codex` CLI (for OpenAI/Codex/Google/xAI/Mistral routes)
-- `jq` (optional, used for Anthropic OAuth token load)
+- `codex` CLI (for OpenAI/GitHub Copilot/Google/xAI/Mistral routes)
+- The [pi-ask](https://github.com/artiombell/pi-ask) repo cloned at `D:/dev/pi-ask`
 
-## Standalone CLI Usage
+## Skills
 
-```bash
-# clone
-git clone https://github.com/artiombell/pi-ask.git
-cd pi-ask
-chmod +x scripts/pi-ask
+| Skill | Description |
+|-------|-------------|
+| `pi-ask` | Send context to another model for a second opinion |
 
-# list models known to the wrapper
-scripts/pi-ask --list
+## Usage
 
-# probe model availability without sending context
-scripts/pi-ask opus --probe
-
-# send context by file
-scripts/pi-ask opus -f /tmp/context.md
-
-# send context by stdin
-cat /tmp/context.md | scripts/pi-ask sonnet
+```
+/skill:pi-ask opus "What's the best approach for implementing retry logic?"
 ```
 
-Optional alias:
+Or from the `/pi-ask` command (if wired as a Pi command):
 
-```bash
-alias pi-ask="$PWD/scripts/pi-ask"
+```
+/pi-ask codex
 ```
 
-## Install as Oh My Pi Plugin
+## Model Resolution
 
-```bash
-# from local checkout (for development)
-omp plugin link /absolute/path/to/pi-ask
+Any model name accepted by the `claude` CLI or `codex` CLI works directly:
 
-# from npm (after publish)
-omp plugin install pi-ask
+```
+pi-ask opus                            # alias -> claude-opus-4-6
+pi-ask claude-sonnet-4-6               # Anthropic, passed through
+pi-ask gpt-5.3-codex                   # OpenAI via codex CLI
+pi-ask github-copilot/gpt-5.3-codex   # GitHub Copilot via codex CLI
+pi-ask gemini-3.1-pro                  # Gemini via codex CLI
+pi-ask grok-4                          # Grok via codex CLI
 ```
 
-After install, the plugin exposes tool `pi_ask` with parameters:
-- `model` (required unless `listModels=true`)
-- `prompt` or `contextFile` (required unless `probe=true` or `listModels=true`)
-- `probe` (optional boolean)
-- `listModels` (optional boolean)
+Provider is inferred from the model name:
+- `claude-*` -> `claude` CLI (Anthropic)
+- Everything else -> `codex` CLI
 
-## Exit Codes (CLI)
-
-- `0` success
-- `1` model not found or ambiguous alias
-- `2` model unavailable (probe failed)
-- `4` context file not found
-- `5` no stdin and no `-f` input
-
-## Notes
-
-- `pi-ask` does not enforce artificial timeouts. Let the model run until completion or interrupt with `Ctrl-C`.
-- For Anthropic models, nested-session env vars are unset before invoking `claude` to allow use from agent environments.
-- For non-Anthropic routes, `codex exec -m <model>` is used and noisy CLI wrappers are filtered from output.
+Run `pi-ask --list` to see shortcut aliases.
